@@ -42,7 +42,7 @@ async def get_ai_analysis(content: str, description: str = "", setup: str = "") 
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Analyze this code and provide insights about what it does. Compare it against the following model description and setup instructions. Indicate whether it matches both:\n\nModel description: {description}\n\nSetup instructions: {setup}\n\nCode:\n{content}"
+                    "content": f"Analyze the following code and documentation, and compare it against the provided model description and setup instructions. Based on the contents and how well they match, decide if this model should be PUBLISHED or REJECTED. Be strict but fair. At the end of your message, write one of the following clearly: '✅ PUBLISH' or '❌ REJECT'. Justify your decision.\n\nModel description: {description}\n\nSetup instructions: {setup}\n\nCode:\n{content}"
                 }
             ]
         }
