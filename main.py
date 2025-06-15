@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from openai import OpenAI
 from pydantic import BaseModel
 import zipfile
@@ -11,13 +11,13 @@ import tempfile
 import shutil
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-# Get configuration from environment variables
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY environment variable is not set")
+    raise ValueError("OPENROUTER_API_KEY environment variable is not set or couldn't be loaded")
+
+print(f"🔐 Loaded API Key: {OPENROUTER_API_KEY[:6]}...")  # optional debug
 
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek/deepseek-r1-0528-qwen3-8b:free")
@@ -29,7 +29,7 @@ app = FastAPI()
 class AIRequest(BaseModel):
     prompt: str
 
-async def get_ai_analysis(content: str) -> str:
+async def get_ai_analysis(content: str, description: str = "", setup: str = "") -> str:
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -42,7 +42,7 @@ async def get_ai_analysis(content: str) -> str:
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Analyze this code and provide insights about what it does, its purpose, and any potential improvements. Here's the code:\n\n{content}"
+                    "content": f"Analyze this code and provide insights about what it does. Compare it against the following model description and setup instructions. Indicate whether it matches both:\n\nModel description: {description}\n\nSetup instructions: {setup}\n\nCode:\n{content}"
                 }
             ]
         }
@@ -102,7 +102,7 @@ async def get_ai_response(request: AIRequest):
     except Exception as e:
         return {"error": f"Error in AI response: {str(e)}"}
 
-async def analyze_file_content(file_path: str) -> Dict:
+async def analyze_file_content(file_path: str, description: str = "", setup: str = "") -> Dict:
     """Analyze the content of a file and return its details."""
     try:
         # Skip hidden files
@@ -131,7 +131,7 @@ async def analyze_file_content(file_path: str) -> Dict:
                 content = f.read()
             # Get AI analysis for text files
             if file_type == 'text/x-python' or file_type == 'text/plain':
-                ai_analysis = await get_ai_analysis(content)
+                ai_analysis = await get_ai_analysis(content, description, setup)
         elif file_type.startswith('image/'):
             content = "Binary image file"
         else:
@@ -151,7 +151,11 @@ async def analyze_file_content(file_path: str) -> Dict:
         }
 
 @app.post("/process-zip")
-async def process_zip_file(file: UploadFile = File(...)):
+async def process_zip_file(
+    file: UploadFile = File(...),
+    description: str = Form(...),
+    setup: str = Form(...)
+):
     if not file.filename.endswith('.zip'):
         return {"error": "File must be a ZIP file"}
     
@@ -174,7 +178,7 @@ async def process_zip_file(file: UploadFile = File(...)):
         for root, dirs, files in os.walk(extract_dir):
             for file in files:
                 file_path = os.path.join(root, file)
-                analysis = await analyze_file_content(file_path)
+                analysis = await analyze_file_content(file_path, description=description, setup=setup)
                 file_analyses.append(analysis)
         
         return {
