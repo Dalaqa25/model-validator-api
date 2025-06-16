@@ -10,6 +10,7 @@ import httpx
 import tempfile
 import shutil
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -17,14 +18,21 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY environment variable is not set or couldn't be loaded")
 
-print(f"🔐 Loaded API Key: {OPENROUTER_API_KEY[:6]}...")  # optional debug
-
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek/deepseek-r1-0528-qwen3-8b:free")
 SITE_URL = os.getenv("SITE_URL", "http://localhost:3000")
 SITE_NAME = os.getenv("SITE_NAME", "Model Validator API")
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class AIRequest(BaseModel):
     prompt: str
@@ -42,7 +50,31 @@ async def get_ai_analysis(content: str, description: str = "", setup: str = "") 
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Analyze the following code and documentation, and compare it against the provided model description and setup instructions. Based on the contents and how well they match, decide if this model should be PUBLISHED or REJECTED. Be strict but fair. At the end of your message, write one of the following clearly: '✅ PUBLISH' or '❌ REJECT'. Justify your decision.\n\nModel description: {description}\n\nSetup instructions: {setup}\n\nCode:\n{content}"
+                    "content": f"""Analyze the following code and documentation for a machine learning model. Your task is to determine if the model should be PUBLISHED or REJECTED based on these criteria:
+
+1. Code Quality and Relevance:
+   - The code must implement the functionality described in the model description
+   - The code must be relevant to the stated purpose
+   - Even if the code is simple or minimal, it should be accepted as long as it works
+   - Accept any working code, even if it's basic or uses common libraries
+
+2. Documentation Quality:
+   - The description must clearly explain the model's purpose
+   - The setup instructions must be detailed and match the code
+   - Both must be more than just repeated statements
+
+3. Consistency:
+   - The code, description, and setup instructions must all align
+   - There should be no contradictions between them
+
+Model Description: {description}
+
+Setup Instructions: {setup}
+
+Code:
+{content}
+
+Based on these criteria, provide a detailed analysis and end with either '✅ PUBLISH' or '❌ REJECT'. Be very lenient in your evaluation - if the code works and matches the description, it should be published even if it's simple or uses common libraries. Only reject if the code is completely non-functional or has no relation to the description."""
                 }
             ]
         }
@@ -66,41 +98,6 @@ async def get_ai_analysis(content: str, description: str = "", setup: str = "") 
 @app.get("/")
 def root():
     return {"message": "FastAPI is running!"}
-
-@app.post("/ai")
-async def get_ai_response(request: AIRequest):
-    try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "HTTP-Referer": SITE_URL,
-            "X-Title": SITE_NAME
-        }
-        
-        data = {
-            "model": MODEL_NAME,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": request.prompt
-                }
-            ]
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
-                headers=headers,
-                json=data
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return {"response": result['choices'][0]['message']['content']}
-            else:
-                return {"error": f"API returned status code {response.status_code}"}
-            
-    except Exception as e:
-        return {"error": f"Error in AI response: {str(e)}"}
 
 async def analyze_file_content(file_path: str, description: str = "", setup: str = "") -> Dict:
     """Analyze the content of a file and return its details."""
@@ -157,7 +154,12 @@ async def process_zip_file(
     setup: str = Form(...)
 ):
     if not file.filename.endswith('.zip'):
-        return {"error": "File must be a ZIP file"}
+        return {
+            "isValid": False,
+            "message": "File must be a ZIP file",
+            "files_analyzed": [],
+            "ai_analysis": None
+        }
     
     # Create a unique temporary directory
     extract_dir = tempfile.mkdtemp(prefix="zip_analysis_")
@@ -175,22 +177,52 @@ async def process_zip_file(
         
         # Analyze each extracted file
         file_analyses = []
+        has_python_files = False
+        all_python_content = []
+        
         for root, dirs, files in os.walk(extract_dir):
             for file in files:
                 file_path = os.path.join(root, file)
                 analysis = await analyze_file_content(file_path, description=description, setup=setup)
                 file_analyses.append(analysis)
+                
+                # Check for Python files
+                if file.endswith('.py'):
+                    has_python_files = True
+                    if 'content' in analysis:
+                        all_python_content.append(analysis['content'])
+        
+        # Basic validation rules
+        validation_message = []
+        if not has_python_files:
+            validation_message.append("No Python files found in the ZIP")
+        
+        # Get AI analysis of all Python files combined
+        ai_analysis = None
+        if all_python_content:
+            combined_content = "\n\n".join(all_python_content)
+            ai_analysis = await get_ai_analysis(combined_content, description, setup)
+            
+            # Only reject if AI explicitly says to reject
+            is_rejected = "❌ REJECT" in ai_analysis
+            if is_rejected:
+                validation_message.append("Code appears to be a placeholder or test code")
+        
+        # Determine if the validation passed
+        is_valid = has_python_files and not validation_message
+        
+        # Clean up the temporary directory
+        shutil.rmtree(extract_dir)
         
         return {
-            "message": "ZIP file processed successfully",
-            "files_analyzed": file_analyses
+            "isValid": is_valid,
+            "message": "Validation successful" if is_valid else "Validation failed: " + "; ".join(validation_message),
+            "files_analyzed": file_analyses,
+            "ai_analysis": ai_analysis
         }
         
     except Exception as e:
-        return {"error": f"Error processing ZIP file: {str(e)}"}
-    finally:
-        # Clean up: remove the temporary directory and its contents
-        try:
+        # Clean up the temporary directory in case of error
+        if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir)
-        except Exception as e:
-            print(f"Error cleaning up temporary directory: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 
